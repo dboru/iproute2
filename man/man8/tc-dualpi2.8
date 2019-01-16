@@ -1,0 +1,201 @@
+.TH DUALPI2 8 "13 December 2018" "iproute2" "Linux"
+
+.SH NAME
+DUALPI2 \- Dual Queue Proportional Integral Controller AQM - Improved with a square
+.SH SYNOPSIS
+.sp
+.ad l
+.in +8
+.ti -8
+.BR tc " " qdisc " ... " dualpi2
+.br
+.RB "[ " limit
+.IR PACKETS " ]"
+.br
+.RB "[ " target
+.IR TIME " ]"
+.br
+.RB "[ " tupdate
+.IR TIME " ]"
+.br
+.RB "[ " alpha
+.IR float " ]"
+.br
+.RB "[ " beta
+.IR float " ] "
+.br
+.RB "[ " no_dualq " | " l4s_dualq " | " dc_dualq " ]"
+.br
+.RB "[ " k
+.IR int " ]"
+.br
+.RB "[ " no_ecn " | " classic_ecn " | " l4s_ecn " | " dc_ecn " ]"
+.br
+.RB "[ " l_thresh
+.IR TIME " ]"
+.br
+.RB "[ " t_shift
+.IR TIME " ] "
+.br
+.RB "[ " c_limit " | " l_drop
+.IR int " ] "
+.br
+.RB "[ " drop_enqueue " | " drop_dequeue " ]"
+.br
+.RB "[ " wrr_ratio
+.IR PACKETS " ] "
+
+.SH DESCRIPTION
+DUALPI2 AQM is a combination of the DUALQ Coupled-AQM with a PI2 base-AQM. The PI2 AQM (details can be found in the paper cited below) is in turn both an extension and a simplification of the PIE AQM. PI2 makes quite some PIE heuristics unnecessary, while being able to control scalable congestion controls like DCTCP and TCP-Prague. With PI2, both Reno/Cubic can be used in parallel with DCTCP, maintaining window fairness. DUALQ provides latency separation between low latency DCTCP flows and Reno/Cubic flows that need a bigger queue. The main design goals are:
+.PD 0
+.IP \(bu 4
+L4S - Low Loss, Low Latency and Scalable congestion control support
+.IP \(bu 4
+DualQ option to separate the L4S traffic in a low latency queue, without harming remaining traffic that is scheduled in classic queue due to congestion-coupling
+.IP \(bu 4
+Configurable overload strategies
+.IP \(bu 4
+Use of sojourn time to reliably estimate queue delay
+.IP \(bu 4
+Simple implementation
+.IP \(bu 4
+Guaranteed stability and fast responsiveness
+.PD
+
+.SH ALGORITHM
+DUALPI2 is designed to provide low loss and low latency to L4S traffic, without harming classic traffic. Every update interval a new internal base probability is calculated, based on queue delay. The base probability is updated with a delta based on the difference between the current queue delay and the target delay, and the queue growth comparing with the queuing delay during the previous interval.
+The integral gain factor alpha is used to correct slowly enough any persistent standing queue error to the user specified target delay, while the proportional gain factor beta is used to quickly compensate for queue changes (growth or shrink).
+
+The updated base probability is used as input to decide to mark and drop packets. DUALPI2 scales the calculated probability for each of the two queues accordingly. For the L4S queue, the probability is multiplied by a scaling factor k, while for the classic queue, it is squared to compensate the squareroot rate equation of Reno/Cubic. The ECT identifier is used to classify traffic into respective queues.
+
+If DUALPI2 AQM has detected overload (when excessive non-responsive traffic is sent), it can signal congestion solely using drop, irrespective of the ECN field, or alternatively limit the drop probability and let the queue grow and eventually overflow (like tail-drop).
+
+Additional details can be found in the draft cited below.
+
+.SH PARAMETERS
+.TP
+.BI limit " PACKETS"
+Limit the number of packets that can be enqueued. Incoming packets are dropped when this limit
+is reached. This limit is common for the L4S and Classic queue. Defaults to
+.I 10000
+packets. This is about 120ms delay on a 1Gbps link.
+.TP
+.BI target " TIME"
+Set the expected queue delay. Defaults to
+.I 20
+ms.
+.TP
+.BI tupdate " TIME"
+Set the frequency at which the system drop probability is calculated. Defaults to
+.I 32
+ms. This should be a third of the max RTT supported.
+.TP
+.BI alpha " float"
+.PD 0
+.TP
+.PD
+.BI beta " float"
+Set alpha and beta, the integral and proportional gain factors in Hz for the PI controller. These
+ can be calculated based on control theory and should be in the range between 0.00390625 and 40000. Defaults are
+.I 0.3125
+and
+.I 3.125
+Hz, which provide stable control for RTT's up to 100ms with tupdate of 30ms. Be aware, unlike with PIE, these are the real unscaled gain factors.
+.TP
+.B no_dualq | l4s_dualq | dc_dualq
+Configures the ECN based queue selection/classifier. Two dualq options are available, the first for the standardized L4S Internet traffic (TCP-Prague) and the second for DCTCP traffic (mis)using ECT(0). Defaults to
+.I l4s_dualq
+.PD 0
+.TS
+tab(:);
+rb l.
+no_dualq:all traffic in a single queue
+l4s_dualq:dual queue, Classic TCP (non-ECT and ECT(0)) in the classic and TCP-Prague in the low latency queue (for ECT(1) and CE)
+dc_dualq:dual queue, all non-ECN in the classic and all ECN traffic in the low latency queue (legacy DCTCP compatibility)
+.TE
+.PD
+.TP
+.BI k " int"
+Set the coupling rate factor between Classic and L4S. Defaults to
+.I 2
+.TP
+.B no_ecn | classic_ecn | l4s_ecn | dc_ecn
+Configures the ECN or drop classifier. Defaults to
+.I l4s_ecn
+.PD 0
+.TS
+tab(:);
+rb l.
+no_ecn:All traffic is dropped with the classic (squared) probability
+classic_ecn:Mark all ECN capable traffic with classic marking probability
+l4s_ecn:Mark all ECT(0) with classic (squared) probability and ECT(1) with scalable (base*k) probability
+dc_ecn:Mark all ECN Capable Traffic with scalable probability (legacy DCTCP compatibility)
+.TE
+.PD
+.TP
+.BI l_thresh " TIME"
+Set the sojourn queue size when low-latency packets get marked. Defaults to
+.I 1
+ms.
+.TP
+.BI t_shift " TIME
+Set the L4S FIFO time shift. Defaults to
+.I 40
+ms.
+.TP
+.B c_limit  |  l_drop
+Control the overload strategy. Defaults to
+.I c_limit
+.PD 0
+.TS
+tab(:);
+rb l.
+c_limit:Limits the Classic probability to align with 100% scalable probability. Further load will increase the queue and eventually results in overflow.
+l_drop:Set the L4S maximum probability where classic drop is applied to all traffic. Results in high drop probabilities (up to 100%) for all traffic, while maintaining queue target control.
+.TE
+.PD
+.TP
+.B drop_enqueue | drop_dequeue
+Decide when packets are PI-based dropped or marked. The l_thresh based L4S marking is always at dequeue. Defaults to
+.I drop_dequeue
+.PD 0
+.TS
+tab(:);
+rb l.
+drop_enqueue:Drop at enqueue
+drop_dequeue:Drop at dequeue
+.TE
+.PD
+.TP
+.BI wrr_ratio " PACKETS
+Set the Weighted Round-Robin ratio between the L4S queue and the classic one. This protects the L4S queue from bursts in the classic queue, by pacing out those burst. In reaction, the PIE2 controller eventually adjusts the marking/drop probabilities, such that the L4S sender ends up pacing itself (i.e., has sufficiently large transmission gaps in its packet stream to let the classic flow recover). This behavior is disabled if wrr_ratio is set to 0. Default to
+.I 0
+
+.SH EXAMPLES
+Setting DUALPI2 for the Internet with default parameters:
+ # sudo tc qdisc add dev eth0 root dualpi2
+ # tc qdisc
+
+qdisc dualpi2 8001: dev eth0 root refcnt 2 limit 10000p target 20.0ms tupdate 33.3ms alpha 0.312500 beta 3.125000 l4s_dualq l4s_ecn k 2 c_limit et_time l_thresh 1.0ms t_shift 40.0ms t_speed 0 drop_dequeue wrr_ratio 0
+
+Setting DUALPI2 for datacenter with legacy DCTCP using ECT(0):
+ # sudo tc qdisc add dev eth0 root dualpi2 dc_dualq dc_ecn
+ # tc qdisc
+
+qdisc dualpi2 8002: dev eth0 root refcnt 2 limit 10000p target 20.0ms tupdate 32.0ms alpha 0.312500 beta 3.125000 dc_dualq dc_ecn k 2 c_limit et_time l_thresh 1.0ms t_shift 40.0ms t_speed 0 drop_dequeue wrr_ratio 0
+
+.SH SEE ALSO
+.BR tc (8),
+.BR tc-pie (8)
+
+.SH SOURCES
+.IP \(bu 4
+IETF draft submission is at https://www.ietf.org/id/draft-ietf-tsvwg-aqm-dualq-coupled
+.IP \(bu 4
+CoNEXT '16 Proceedings of the 12th International on Conference on emerging Networking EXperiments and Technologies : "PI2: A
+Linearized AQM for both Classic and Scalable TCP"
+
+.SH AUTHORS
+DUALPI2 was implemented by Koen De Schepper, Olga Albisser, Henrik Steen, and Olivier Tilmans also the authors of
+this man page. Please report bugs and corrections to the Linux networking
+development mailing list at <netdev@vger.kernel.org>.
